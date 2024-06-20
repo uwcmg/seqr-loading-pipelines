@@ -2,6 +2,23 @@ import hail as hl
 
 NON_CODING_TRANSCRIPT_EXON_VARIANT = "non_coding_transcript_exon_variant"
 
+# The ordering here comes from the SpliceRegion code at https://github.com/Ensembl/VEP_plugins/blob/release/112/SpliceRegion.pm
+SPLICEREGION_CONSEQUENCE_TERMS = [
+    "splice_donor_5th_base_variant",
+    "splice_donor_region_variant",
+    "splice_polypyrimidine_tract_variant",
+    "extended_intronic_splice_region_variant_5prime",
+    "extended_intronic_splice_region_variant_3prime",
+]
+
+UTRANNOTATOR_CONSEQUENCE_TERMS = [
+    "uAUG_gained",
+    "uSTOP_lost",
+    "uAUG_lost",
+    "uSTOP_gained",
+    "uFrameshift",
+]
+
 # Consequence terms in order of severity (more severe to less severe) as estimated by Ensembl.
 # See https://ensembl.org/info/genome/variation/prediction/predicted_data.html
 CONSEQUENCE_TERMS = [
@@ -44,7 +61,7 @@ CONSEQUENCE_TERMS = [
     "regulatory_region_variant",
     "feature_truncation",
     "intergenic_variant",
-]
+] + SPLICEREGION_CONSEQUENCE_TERMS + UTRANNOTATOR_CONSEQUENCE_TERMS
 
 # hail DictExpression that maps each CONSEQUENCE_TERM to it's rank in the list
 CONSEQUENCE_TERM_RANK_LOOKUP = hl.dict({term: rank for rank, term in enumerate(CONSEQUENCE_TERMS)})
@@ -172,11 +189,13 @@ def get_expr_for_vep_sorted_transcript_consequences_array(vep_root,
         "cdna_end",
         "codons",
         "exon",
+        "five_prime_utr_variant_consequence",
         "gene_id",
         "gene_symbol",
         "hgvsc",
         "hgvsp",
         "intron",
+        "spliceregion",
         "transcript_id",
     ]
 
@@ -201,13 +220,35 @@ def get_expr_for_vep_sorted_transcript_consequences_array(vep_root,
         vep_root.transcript_consequences.map(
             lambda c: c.select(
                 *selected_annotations,
-                consequence_terms=c.consequence_terms.filter(lambda t: ~omit_consequence_terms.contains(t)),
+                consequence_terms=(
+                    c.consequence_terms.filter(
+                        lambda t: ~omit_consequence_terms.contains(t)
+                    )
+                    # Add SpliceRegion and UTRAnnotator results to the consequence terms
+                    .extend(
+                        hl.if_else(
+                            hl.is_defined(c.spliceregion),
+                            c.spliceregion.filter(hl.is_defined),
+                            hl.empty_array(hl.tstr),
+                        )
+                    ).extend(
+                        hl.if_else(
+                            hl.is_defined(c.five_prime_utr_variant_consequence),
+                            [c.five_prime_utr_variant_consequence],
+                            hl.empty_array(hl.tstr)
+                        )
+                    )
+                    .filter(hl.is_defined)
+                ),
                 domains=c.domains.map(lambda domain: domain.db + ":" + domain.name),
                 major_consequence=hl.cond(
                     c.consequence_terms.size() > 0,
-                    hl.sorted(c.consequence_terms, key=lambda t: CONSEQUENCE_TERM_RANK_LOOKUP.get(t))[0],
+                    hl.sorted(
+                        c.consequence_terms,
+                        key=lambda t: CONSEQUENCE_TERM_RANK_LOOKUP.get(t),
+                    )[0],
                     hl.null(hl.tstr),
-                )
+                ),
             )
         )
         .filter(lambda c: c.consequence_terms.size() > 0)
@@ -233,7 +274,9 @@ def get_expr_for_vep_sorted_transcript_consequences_array(vep_root,
                     .default("other")
                 ),
                 hgvs=get_expr_for_formatted_hgvs(c),
-                major_consequence_rank=CONSEQUENCE_TERM_RANK_LOOKUP.get(c.major_consequence),
+                major_consequence_rank=CONSEQUENCE_TERM_RANK_LOOKUP.get(
+                    c.major_consequence
+                ),
             )
         ),
         lambda c: (
@@ -241,8 +284,16 @@ def get_expr_for_vep_sorted_transcript_consequences_array(vep_root,
                 lambda is_coding, is_most_severe, is_canonical: (
                     hl.cond(
                         is_coding,
-                        hl.cond(is_most_severe, hl.cond(is_canonical, 1, 2), hl.cond(is_canonical, 3, 4)),
-                        hl.cond(is_most_severe, hl.cond(is_canonical, 5, 6), hl.cond(is_canonical, 7, 8)),
+                        hl.cond(
+                            is_most_severe,
+                            hl.cond(is_canonical, 1, 2),
+                            hl.cond(is_canonical, 3, 4),
+                        ),
+                        hl.cond(
+                            is_most_severe,
+                            hl.cond(is_canonical, 5, 6),
+                            hl.cond(is_canonical, 7, 8),
+                        ),
                     )
                 ),
                 hl.or_else(c.biotype, "") == "protein_coding",
